@@ -3889,7 +3889,13 @@ Display13OutputWiring XE::display13BoardWiring(IOService *provider) {
     // Display13 physical capacity is shared by ADL-N and mobile ADL/RPL.
     // VBT chooses board routing; a family name must not exclude TC PHYs.
     Display13OutputWiring board;
-    if(!property)board=XELP::VBT::display13Fixed(firmwarePorts,Display13OutputWiring::Physical,xeProfile.family);
+    if(!property) {
+        board=XELP::VBT::display13Fixed(firmwarePorts,Display13OutputWiring::Physical,xeProfile.family);
+        // Local patch (Slim 7 14IAP7): with an eDP panel, keep only the panel. The VBT's USB-C DP-alt
+        // records otherwise make this a multi-output board, whose CDCLK change (adlnSetDualClock) needs
+        // a try-close of the controller gate that fails during the panel modeset and raises clockFaulted.
+        if(board.panel){board.dp=0;board.typeC=0;}
+    }
     else {
         // Preserve the older ADL-N Combo property contract. It cannot select TC.
         if(adlpDisplaySelected)return {};
@@ -6041,7 +6047,17 @@ IOReturn XE::wrapDisplay13FBEnableIRQ(IOService *controller) {
 		c.status=c.quiescing ? Display13FBIRQ::Status::Power : actual.status;
 		if(c.status==Display13FBIRQ::Status::Complete)c.status=c.state.begun && c.state.enabled ?
 			Display13FBIRQ::extendActivePipes(io,c.state,admitted) : Display13FBIRQ::enable(io,c.state,excluded,adlnSharedGT(controller),actual.active,callbackXE->adlnOutputWiring.hotplug(),callbackXE->adlnOutputWiring.typeC);
-	} else c.status=c.quiescing ? Display13FBIRQ::Status::Power : Display13FBIRQ::enable(io,c.state,excluded,adlnSharedGT(controller),1,callbackXE->adlnOutputWiring.hotplug(),callbackXE->adlnOutputWiring.typeC);
+	} else if(c.quiescing)c.status=Display13FBIRQ::Status::Power;
+	else if(c.state.begun && !c.state.faulted && !(c.state.enabled && c.state.active) &&
+		!Display13Transcoder::running(io,0,c.state.transcoders)) {
+		// Local patch (Slim 7 14IAP7): on display wake the native driver enables interrupts
+		// before enablePipe sets PIPECONF. A full enable() then sees no active pipe, fails
+		// Topology and latches the master off, so flips never complete (WindowServer watchdog).
+		// Stay hotplug-only like the multi-output path; the VBL callback re-arms pipe A once
+		// the transcoder really runs.
+		c.status=c.state.enabled && !c.state.active && (io.read(Display13FBIRQ::Master)&Display13FBIRQ::Enable) ?
+			Display13FBIRQ::Status::Complete : Display13FBIRQ::hotplugOnly(io,c.state,false);
+	} else c.status=Display13FBIRQ::enable(io,c.state,excluded,adlnSharedGT(controller),1,callbackXE->adlnOutputWiring.hotplug(),callbackXE->adlnOutputWiring.typeC);
 	adlnIRQCache(controller,io);adlnIRQRecord(record,1);
 	check[23]=static_cast<uint32_t>(c.status);check[24]=c.state.begun;
 	check[25]=c.state.enabled;check[26]=c.state.faulted;check[27]=c.state.active;check[28]=c.state.configured;
@@ -8481,6 +8497,19 @@ void XE::wrapAlderLakeNSetupWorkLoop(IOService *controller,IOWorkLoop *workLoop)
                 const auto ddi=c.bridge.bootPort;
                 const bool dp=ddi<7 && (callbackXE->adlnOutputWiring.links()&(1U<<ddi));
                 bool linked=!dp;
+                // Local patch (Slim 7 14IAP7): the combo eDP boot port reaches adoption before the
+                // donor's probe records its SST mode (port+0x550 = 0), so display13SSTPort() rejects it.
+                // Like the DSI boot path, record mode 1. The verified base setPortMode only stores
+                // port+0x550; panel-only wiring skips the TC setup that resolves it, so store directly then.
+                if(dp && ddi<2 && (callbackXE->adlnOutputWiring.panel&(1U<<ddi)) &&
+                   port && port->getMetaClass()->getClassSize()>=0x6B0 &&
+                   Display13FBMemory::field<uint32_t>(port,0x550)==0 &&
+                   Display13FBMemory::field<uint32_t>(port,0x120)==ddi &&
+                   Display13FBMemory::field<void *>(port,0x578)==c.access) {
+                    if(callbackXE->display13TCBaseMode)
+                        reinterpret_cast<uint32_t (*)(OSObject *,uint32_t)>(callbackXE->display13TCBaseMode)(port,1);
+                    else *reinterpret_cast<uint32_t *>(reinterpret_cast<uint8_t *>(port)+0x550)=1;
+                }
                 if(dp && display13SSTPort(port)) {
                     Display13FBBootIO io{c.map};auto &boot=c.displayScratch;AlderLakeN::readDisplay(io,true,boot);
                     if(ddi>=3) {

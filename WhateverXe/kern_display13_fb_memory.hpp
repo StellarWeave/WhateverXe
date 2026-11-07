@@ -267,9 +267,13 @@ inline bool sharedReservationAccepted(const SharedReservation &r,uint64_t manage
 // A valid subrange alone does not prove the GGTT's mapping; inspect() does that.
 // bootScanout=false verifies backing/ownership for a cold allocation without
 // reading any pipe bank or treating the allocation as an active display.
+// Local patch (Slim 7 14IAP7): a 2880x1800x4 framebuffer is 20,736,000 bytes, not a page multiple.
+// A scanout surface is rows x pitch and Xe-LP pitch is a multiple of 64 bytes, so require that
+// (malformed sizes stay invalid), keep the base page-aligned and bound the page-rounded end.
 inline bool apertureRange(const Pool &p,uint32_t base,uint32_t bytes,uint64_t apertureBytes) {
-    return bytes && !(base&4095) && !(bytes&4095) && base>=p.base &&
-        uint64_t(base)+bytes<=uint64_t(p.base)+p.bytes && uint64_t(base)+bytes<=apertureBytes;
+    const uint64_t end=uint64_t(base)+((uint64_t(bytes)+4095)&~4095ULL);
+    return bytes && !(bytes&63) && !(base&4095) && base>=p.base &&
+        end<=uint64_t(p.base)+p.bytes && end<=apertureBytes;
 }
 // Native IntelScaledModeData is a 64-byte CPU allocation. Its map/memory
 // references are owned by the display pipe until native deallocateScanoutMemory.

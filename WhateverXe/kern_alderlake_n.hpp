@@ -240,7 +240,10 @@ inline bool dpSource(const DisplayReadout &boot,unsigned pipe,unsigned ddi,const
     // preserve it and include it in the unchanged-source check, never clear it
     // on an enabled transcoder or infer an MST transport from that bit alone.
     return (trans&0xFF700000U)==(0x82000000U|((ddi+1)<<27)) &&
-        !(trans&((1U<<15)|(1U<<9))) && !ctl2 &&
+        // Local patch (Slim 7 14IAP7): the GOP leaves the eDP transcoder in
+        // CMTG_SECONDARY_MODE (bit3, Linux intel_display_regs.h). Accept it
+        // for the panel only; the source is adopted unchanged, not retimed.
+        !(trans&((1U<<15)|(1U<<9))) && !(ctl2&~(panel?(1U<<3):0U)) &&
         (lanes==1 || lanes==2 || lanes==4) && ((buf>>1)&7)==lanes-1 &&
         (buf&(typeC && tc->ownershipOptional?0x80000080U:0x800000C0U))==
             (typeC && !tc->ownershipOptional?0x80000040U:0x80000000U) &&
